@@ -1,0 +1,124 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>P2P Chat (WebRTC DataChannel)</title>
+  <style>
+    body{font-family:system-ui,Arial;margin:20px}
+    #log{height:200px;border:1px solid #ccc;padding:8px;overflow:auto}
+    #peers{margin-bottom:8px}
+  </style>
+</head>
+<body>
+  <h1>P2P Chat</h1>
+  <div>
+    <label>Room ID: <input id="room" value="demo"/></label>
+    <button id="join">Rejoindre</button>
+    <button id="start" disabled>Initier (créer offre)</button>
+    <span id="peers">—</span>
+  </div>
+
+  <div style="margin-top:12px">
+    <div id="log"></div>
+    <input id="message" placeholder="Écris un message..." style="width:70%" />
+    <button id="send" disabled>Envoyer</button>
+  </div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const roomInput = document.getElementById('room');
+    const joinBtn = document.getElementById('join');
+    const startBtn = document.getElementById('start');
+    const sendBtn = document.getElementById('send');
+    const msgInput = document.getElementById('message');
+    const peersSpan = document.getElementById('peers');
+
+    function log(...args){
+      const line = document.createElement('div');
+      line.textContent = args.join(' ');
+      logEl.appendChild(line);
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    const ws = new WebSocket('ws://' + location.hostname + ':8080');
+
+    const configuration = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+    let pc = null;
+    let dc = null;
+    let joinedRoom = null;
+
+    ws.onopen = () => log('WebSocket connecté au serveur de signalisation');
+    ws.onmessage = async (evt) => {
+      const msg = JSON.parse(evt.data);
+      if (msg.type === 'joined') {
+        peersSpan.textContent = `Peers in room: ${msg.count}`;
+        startBtn.disabled = false;
+        return;
+      }
+      if (!pc) await setupPeerConnection();
+      if (msg.type === 'offer') {
+        log('Received offer — creating answer');
+        await pc.setRemoteDescription(msg.payload);
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        ws.send(JSON.stringify({ type: 'answer', room: joinedRoom, payload: pc.localDescription }));
+      }
+      if (msg.type === 'answer') {
+        log('Received answer');
+        await pc.setRemoteDescription(msg.payload);
+      }
+      if (msg.type === 'ice') {
+        try { await pc.addIceCandidate(msg.payload); } catch (e) { console.warn('Erreur addIceCandidate', e); }
+      }
+    };
+
+    ws.onerror = (e) => log('WebSocket error', e.message);
+
+    joinBtn.onclick = () => {
+      const room = roomInput.value.trim();
+      if (!room) return alert('Choisis un nom de room');
+      ws.send(JSON.stringify({ type: 'join', room }));
+      joinedRoom = room;
+      log('Rejoint room', room);
+    };
+
+    startBtn.onclick = async () => {
+      if (!joinedRoom) return alert('Rejoins d\'abord une room');
+      if (!pc) await setupPeerConnection();
+      dc = pc.createDataChannel('chat');
+      wireDataChannel(dc);
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      ws.send(JSON.stringify({ type: 'offer', room: joinedRoom, payload: pc.localDescription }));
+      log('Offre envoyée');
+    };
+
+    sendBtn.onclick = () => {
+      const text = msgInput.value;
+      if (!dc || dc.readyState !== 'open') return alert('DataChannel pas ouvert');
+      dc.send(text);
+      log('Moi:', text);
+      msgInput.value = '';
+    };
+
+    async function setupPeerConnection(){
+      pc = new RTCPeerConnection(configuration);
+      pc.onicecandidate = (e) => {
+        if (e.candidate) ws.send(JSON.stringify({ type: 'ice', room: joinedRoom, payload: e.candidate }));
+      };
+      pc.ondatachannel = (ev) => { dc = ev.channel; wireDataChannel(dc); log('DataChannel reçu'); };
+      pc.onconnectionstatechange = () => { log('PC state:', pc.connectionState); };
+      return pc;
+    }
+
+    function wireDataChannel(channel){
+      channel.onopen = () => { log('DataChannel ouvert — tu peux envoyer des messages'); sendBtn.disabled = false; };
+      channel.onmessage = (e) => log('Peer:', e.data);
+      channel.onclose = () => { log('DataChannel fermé'); sendBtn.disabled = true; };
+      channel.onerror = (err) => log('DataChannel error', err);
+    }
+  </script>
+</body>
+</html>
+
